@@ -14,6 +14,7 @@ import torch
 import csv
 import re
 from multiprocessing import Pool
+import time
 
 # Global variable for the pipeline, initialized as None in each worker process
 pipe = None
@@ -121,118 +122,70 @@ def analyze_image(image_path, pipe):
         return ""
 
 def extract_details(response_text):
-    """
-    Extracts structured sections from the analysis response.
-
-    Returns:
-        dict: Dictionary with keys for each section.
-    """
-    # Define section headers and their keys
+    """Extracts structured sections from the response."""
     headers = [
         ("entities_relationships", r"### \*\*1\.\s*Entities & Relationships.*?\*\*"),
         ("scene_description", r"### \*\*2\.\s*Scene Description.*?\*\*"),
         ("event_description", r"### \*\*3\.\s*Event Description.*?\*\*"),
         ("objects_list", r"### \*\*4\.\s*Objects List.*?\*\*")
     ]
-
-    header_starts = {}
-    header_ends = {}
-    for key, pattern in headers:
-        match = re.search(pattern, response_text)
-        if match:
-            header_starts[key] = match.start()
-            header_ends[key] = match.end()
-
-    # Sort sections by their starting position
+    header_starts = {key: re.search(pat, response_text).start() for key, pat in headers if re.search(pat, response_text)}
+    header_ends = {key: re.search(pat, response_text).end() for key, pat in headers if re.search(pat, response_text)}
     sorted_keys = sorted(header_starts, key=header_starts.get)
     details = {}
     for i, key in enumerate(sorted_keys):
         start = header_ends[key]
         end = header_starts[sorted_keys[i + 1]] if i + 1 < len(sorted_keys) else None
-        section_text = response_text[start:end].strip() if end else response_text[start:].strip()
-
-        if key == "scene_description":
-            cleaned_text = section_text
-        else:
-            lines = section_text.split("\n")
-            cleaned_lines = [re.sub(r"^\*\s+", "", line) for line in lines if line.strip()]
-            if key == "event_description":
-                cleaned_lines = [re.sub(r"\*\*(Possibility \d+:)\*\*", r"\1", line) for line in cleaned_lines]
-            cleaned_text = "\n".join(cleaned_lines)
-
-        details[key] = cleaned_text
-
-    # Ensure all sections exist
-    for key, _ in headers:
-        if key not in details:
-            details[key] = "No data available"
-
-    return details
+        text = response_text[start:end].strip() if end else response_text[start:].strip()
+        lines = [re.sub(r"^\*\s+", "", line) for line in text.split("\n") if line.strip()]
+        details[key] = "\n".join(lines)
+    return {key: details.get(key, "No data available") for key, _ in headers}
 
 def remove_markdown_bolding(text):
-    """
-    Removes Markdown bolding (i.e., **text**) from the input text.
-
-    Args:
-        text (str): Input text with possible Markdown bolding.
-
-    Returns:
-        str: Text with bolding removed.
-    """
+    """Removes Markdown bolding from text."""
     return re.sub(r'\*\*(.*?)\*\*', r'\1', text)
 
 def process_image(image_path):
-    """
-    Processes a single image by loading the model (if not loaded), analyzing the image,
-    extracting details, and returning structured data.
-
-    Args:
-        image_path (str): Path to the image file.
-
-    Returns:
-        dict or None: Structured data dictionary or None if processing fails.
-    """
+    """Processes an image and returns structured data with timing."""
     global pipe
     try:
-        # Load the pipeline only once per worker process
         if pipe is None:
             pipe = pipeline("image-text-to-text", model="unsloth/gemma-3-12b-it-bnb-4bit", torch_dtype=torch.bfloat16)
-            # Optional: Compile the model for speed (comment out if not supported)
-            pipe.model = torch.compile(pipe.model)
-        # Analyze the image
+            # pipe.model = torch.compile(pipe.model)  # Optional: Uncomment if supported
+        start_time = time.time()
         analysis = analyze_image(image_path, pipe)
-        if not analysis or analysis.strip() == "":
-            return None
-        # Extract structured details
-        analysis_data = extract_details(analysis)
-        # Clean the data by removing Markdown bolding
-        cleaned_data = {key: remove_markdown_bolding(value) for key, value in analysis_data.items()}
-        return {
-            'image_path': image_path,
-            'entities_relationships': cleaned_data["entities_relationships"],
-            'scene_description': cleaned_data["scene_description"],
-            'event_description': cleaned_data["event_description"],
-            'objects_list': cleaned_data["objects_list"]
-        }
+        if analysis and analysis.strip():
+            analysis_data = extract_details(analysis)
+            cleaned_data = {k: remove_markdown_bolding(v) for k, v in analysis_data.items()}
+            duration = time.time() - start_time
+            return {
+                'image_path': image_path,
+                'status': 'success',
+                'entities_relationships': cleaned_data["entities_relationships"],
+                'scene_description': cleaned_data["scene_description"],
+                'event_description': cleaned_data["event_description"],
+                'objects_list': cleaned_data["objects_list"],
+                'duration': duration
+            }
+        return {'image_path': image_path, 'status': 'failed'}
     except Exception as e:
         print(f"Error processing {image_path}: {e}")
-        return None
+        return {'image_path': image_path, 'status': 'failed'}
 
 if __name__ == '__main__':
-    # List of image paths (adjust range and path as needed)
-    image_paths = [f'/content/images/{i:05d}.jpg' for i in range(1, 13001)]
+    # Example image paths (adjust as needed)
+    image_paths = [f'images/{i:05d}.jpg' for i in range(1, 13001)]
     csv_file = 'structured_image_analysis_results.csv'
-    num_workers = 10  # Number of worker processes; adjust based on GPU memory
+    num_workers = 10  # Adjust based on GPU capacity
+    total_images = len(image_paths)
+    counter = 0
 
-    # Create a pool of worker processes and process images in parallel
     with Pool(num_workers) as pool:
         with open(csv_file, 'w', newline='', encoding='utf-8') as file:
             writer = csv.writer(file)
-            # Write CSV header
             writer.writerow(["Image Path", "Entities & Relationships", "Scene Description", "Event Description", "Objects List"])
-            # Process images and write results as they become available
             for result in pool.imap_unordered(process_image, image_paths):
-                if result:
+                if result['status'] == 'success':
                     writer.writerow([
                         result['image_path'],
                         result['entities_relationships'],
@@ -240,3 +193,7 @@ if __name__ == '__main__':
                         result['event_description'],
                         result['objects_list']
                     ])
+                    counter += 1
+                    print(f"Processed {result['image_path']} in {result['duration']:.2f} seconds. Total processed: {counter}/{total_images}")
+                else:
+                    print(f"Failed to process {result['image_path']}")
