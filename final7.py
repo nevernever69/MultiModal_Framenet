@@ -2,7 +2,7 @@
 """
 gemma_analysis.py
 
-This script processes images using the Gemma model in parallel across multiple GPUs, saving results to a CSV.
+This script processes images using the Gemma model in parallel, saving results to a CSV.
 It uses the fast image processor for improved performance and includes timing and progress stats.
 """
 
@@ -12,62 +12,23 @@ from transformers import pipeline
 import torch
 import csv
 import re
+from multiprocessing import Pool
 import time
-from concurrent.futures import ProcessPoolExecutor
-import numpy as np
 
 # Global pipeline variable, initialized in each worker
 pipe = None
+worker_device = None  # Global variable to hold the GPU id for this worker
 
-def initialize_worker(worker_id):
-    """
-    Initialize the worker with the correct GPU assignment.
-    
-    Args:
-        worker_id (int): The ID of this worker
-    """
-    global pipe
-    
-    # Number of GPUs available
-    num_gpus = 2
-    
-    # Map worker to GPU
-    gpu_id = worker_id % num_gpus
-    print(f"Worker {worker_id} assigned to GPU {gpu_id}")
-    
-    # Set the visible device for this process
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-    
-    # Load the pipeline with device mapping
-    device = f"cuda:{0}"  # Always use cuda:0 since we've set CUDA_VISIBLE_DEVICES
-    pipe = pipeline(
-        "image-text-to-text", 
-        model="unsloth/gemma-3-12b-it-bnb-4bit", 
-        torch_dtype=torch.bfloat16, 
-        use_fast=True,
-        device=device
-    )
-    
-    # Optional: Compile model for better performance if supported
-    try:
-        pipe.model = torch.compile(pipe.model)
-        print(f"Worker {worker_id} on GPU {gpu_id}: Model successfully compiled")
-    except Exception as e:
-        print(f"Worker {worker_id} on GPU {gpu_id}: Model compilation skipped - {str(e)}")
+def init_worker(gpu_id):
+    """Initializer for each pool worker to set the global GPU device."""
+    global worker_device, pipe
+    worker_device = gpu_id
+    pipe = None  # Ensure pipeline is re-initialized per worker
 
-def analyze_image(image_path):
+def analyze_image(image_path, pipe):
     """
     Analyzes an image using the Gemma model and returns the assistant's text response.
-
-    Args:
-        image_path (str): Path to the image file.
-
-    Returns:
-        str: Generated text response or an empty string if an error occurs.
     """
-    global pipe
-    
-    # Define the prompt as a list of messages
     messages = [
         {
             "role": "user",
@@ -142,14 +103,11 @@ def analyze_image(image_path):
             ]
         }
     ]
-
     try:
-        # Generate response from the pipeline
         response = pipe(
             text=messages,
-            max_new_tokens=1200  # Limit the output tokens
+            max_new_tokens=1200
         )
-        # Extract the assistant's response text
         if response and "generated_text" in response[0] and len(response[0]["generated_text"]) > 0:
             return response[0]["generated_text"][-1]["content"]
         else:
@@ -182,90 +140,74 @@ def remove_markdown_bolding(text):
     """Removes Markdown bolding from text."""
     return re.sub(r'\*\*(.*?)\*\*', r'\1', text)
 
-def process_image(image_path):
+def process_image(task):
     """
-    Processes an image and returns structured data with timing.
+    Processes an image on the designated GPU and returns structured data with timing.
+    task is a tuple: (image_path, gpu_id)
+    """
+    image_path, gpu_id = task
+    global pipe, worker_device
+
+    # Initialize the pipeline if not done already. Each worker has its own GPU (worker_device)
+    if pipe is None:
+        pipe = pipeline(
+            "image-text-to-text",
+            model="unsloth/gemma-3-12b-it-bnb-4bit",
+            torch_dtype=torch.bfloat16,
+            use_fast=True,
+            device=gpu_id  # Manually assign GPU device
+        )
+        # Optionally compile the model if supported
+        pipe.model = torch.compile(pipe.model)
     
-    Args:
-        image_path (str): Path to the image file
-    """
-    try:
-        # The pipeline should already be initialized by initialize_worker
-        start_time = time.time()
-        analysis = analyze_image(image_path)
-        
-        if analysis and analysis.strip():
-            analysis_data = extract_details(analysis)
-            cleaned_data = {k: remove_markdown_bolding(v) for k, v in analysis_data.items()}
-            duration = time.time() - start_time
-            
-            # Get process/worker ID for logging
-            import os
-            worker_id = os.getpid()
-            
-            return {
-                'image_path': image_path,
-                'status': 'success',
-                'entities_relationships': cleaned_data["entities_relationships"],
-                'scene_description': cleaned_data["scene_description"],
-                'event_description': cleaned_data["event_description"],
-                'objects_list': cleaned_data["objects_list"],
-                'duration': duration,
-                'worker_id': worker_id
-            }
-        return {'image_path': image_path, 'status': 'failed', 'worker_id': os.getpid()}
-    except Exception as e:
-        print(f"Worker {os.getpid()}: Error processing {image_path}: {e}")
-        return {'image_path': image_path, 'status': 'failed', 'worker_id': os.getpid()}
+    start_time = time.time()
+    analysis = analyze_image(image_path, pipe)
+    if analysis and analysis.strip():
+        analysis_data = extract_details(analysis)
+        cleaned_data = {k: remove_markdown_bolding(v) for k, v in analysis_data.items()}
+        duration = time.time() - start_time
+        return {
+            'image_path': image_path,
+            'status': 'success',
+            'entities_relationships': cleaned_data["entities_relationships"],
+            'scene_description': cleaned_data["scene_description"],
+            'event_description': cleaned_data["event_description"],
+            'objects_list': cleaned_data["objects_list"],
+            'duration': duration,
+            'gpu': gpu_id
+        }
+    return {'image_path': image_path, 'status': 'failed', 'gpu': gpu_id}
 
 if __name__ == '__main__':
-    # Configuration
-    num_gpus = 2  # Number of H100 GPUs available
-    num_workers = num_gpus  # One worker per GPU for large models like Gemma
+    # Generate list of image paths; adjust as needed
+    image_paths = [f'images/pipe.model{i:05d}.jpg' for i in range(1, 11)]  # Example for 10 images
     
-    # Example image paths (adjust as needed)
-    image_paths = [f'images/pipe.model{i:05d}.jpg' for i in range(1, 13001)]  # For 13k+ images
+    # Create tasks as tuples: (image_path, gpu_id) using round-robin assignment.
+    tasks = [(img, i % 2) for i, img in enumerate(image_paths)]
+    
     csv_file = 'structured_image_analysis_results.csv'
-    
-    total_images = len(image_paths)
-    processed_count = 0
-    
-    # Create and configure the process pool with initializer
-    with ProcessPoolExecutor(max_workers=num_workers, initializer=initialize_worker, 
-                            initargs=(list(range(num_workers)),)) as executor:
-        # Open CSV file for writing results
+    total_images = len(tasks)
+    counter = 0
+
+    # Create a pool with 2 workers; we initialize each with its GPU device.
+    # Here we use an initializer with an argument. Since Pool’s initializer
+    # cannot directly accept per-worker arguments, we simulate this by having each
+    # task carry its device id.
+    with Pool(processes=2) as pool:
         with open(csv_file, 'w', newline='', encoding='utf-8') as file:
             writer = csv.writer(file)
-            # CSV header - only analysis data, no process info
-            writer.writerow(["Image Path", "Entities & Relationships", "Scene Description", "Event Description", "Objects List"])
-            
-            # Submit all image processing tasks
-            future_to_image = {executor.submit(process_image, img_path): img_path for img_path in image_paths}
-            
-            # Process results as they complete
-            import concurrent.futures
-            for future in concurrent.futures.as_completed(future_to_image):
-                img_path = future_to_image[future]
-                try:
-                    result = future.result()
-                    if result['status'] == 'success':
-                        # Write only the analysis data to CSV
-                        writer.writerow([
-                            result['image_path'],
-                            result['entities_relationships'],
-                            result['scene_description'],
-                            result['event_description'],
-                            result['objects_list']
-                        ])
-                        processed_count += 1
-                        
-                        # Log processing details to console
-                        if processed_count % 10 == 0 or processed_count == 1 or processed_count == total_images:
-                            print(f"Progress: {processed_count}/{total_images} images ({processed_count/total_images*100:.1f}%)")
-                            print(f"Last processed: {result['image_path']} by Worker {result['worker_id']} in {result['duration']:.2f} seconds")
-                    else:
-                        print(f"Failed to process {result['image_path']}")
-                except Exception as exc:
-                    print(f"Processing of {img_path} generated an exception: {exc}")
-    
-    print(f"Processing complete. {processed_count} images successfully processed.")
+            writer.writerow(["Image Path", "GPU", "Entities & Relationships", "Scene Description", "Event Description", "Objects List"])
+            for result in pool.imap_unordered(process_image, tasks):
+                if result['status'] == 'success':
+                    writer.writerow([
+                        result['image_path'],
+                        result['gpu'],
+                        result['entities_relationships'],
+                        result['scene_description'],
+                        result['event_description'],
+                        result['objects_list']
+                    ])
+                    counter += 1
+                    print(f"Processed {result['image_path']} on GPU {result['gpu']} in {result['duration']:.2f} seconds. Total processed: {counter}/{total_images}")
+                else:
+                    print(f"Failed to process {result['image_path']} on GPU {result['gpu']}")
