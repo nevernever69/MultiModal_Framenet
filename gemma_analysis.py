@@ -12,6 +12,7 @@ import torch
 import csv
 import os
 import re
+import time
 
 # Load the Gemma model pipeline with GPU acceleration and 4-bit quantization
 pipe = pipeline(
@@ -193,8 +194,12 @@ def main():
                 print(f"Image path {image_path} does not exist. Skipping.")
                 continue
 
+            start_time = time.time()  # Start timing before analysis
             analysis = analyze_image(image_path, pipe)
-            print(f"Analysis for {image_path}:\n{analysis}")
+            end_time = time.time()  # End timing after analysis
+            duration = end_time - start_time  # Calculate duration
+
+            print(f"Analysis for {image_path} (Time Taken: {duration:.2f} seconds):\n{analysis}")
 
             if not analysis or analysis.strip() == "":
                 print(f"Warning: No response for {image_path}. Skipping.")
