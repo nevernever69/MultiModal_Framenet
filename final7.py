@@ -140,22 +140,26 @@ def remove_markdown_bolding(text):
     """Removes Markdown bolding from text."""
     return re.sub(r'\*\*(.*?)\*\*', r'\1', text)
 
+
 def process_image(task):
     """
     Processes an image on the designated GPU and returns structured data with timing.
     task is a tuple: (image_path, gpu_id)
     """
     image_path, gpu_id = task
-    global pipe, worker_device
+    global pipe
 
-    # Initialize the pipeline if not done already. Each worker has its own GPU (worker_device)
+    # Set the visible GPU for this process so that only the desired GPU is used.
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    torch.cuda.set_device(0)  # In the context of this process, the chosen GPU is now device 0
+
     if pipe is None:
+        # Load the pipeline without the device argument
         pipe = pipeline(
             "image-text-to-text",
             model="unsloth/gemma-3-12b-it-bnb-4bit",
             torch_dtype=torch.bfloat16,
-            use_fast=True,
-            device=gpu_id  # Manually assign GPU device
+            use_fast=True
         )
         # Optionally compile the model if supported
         pipe.model = torch.compile(pipe.model)
@@ -180,7 +184,7 @@ def process_image(task):
 
 if __name__ == '__main__':
     # Generate list of image paths; adjust as needed
-    image_paths = [f'images/pipe.model{i:05d}.jpg' for i in range(1, 11)]  # Example for 10 images
+    image_paths = [f'images/pipe.model{i:05d}.jpg' for i in range(1, 11)]
     
     # Create tasks as tuples: (image_path, gpu_id) using round-robin assignment.
     tasks = [(img, i % 2) for i, img in enumerate(image_paths)]
@@ -189,10 +193,7 @@ if __name__ == '__main__':
     total_images = len(tasks)
     counter = 0
 
-    # Create a pool with 2 workers; we initialize each with its GPU device.
-    # Here we use an initializer with an argument. Since Pool’s initializer
-    # cannot directly accept per-worker arguments, we simulate this by having each
-    # task carry its device id.
+    # Create a pool with 2 workers.
     with Pool(processes=2) as pool:
         with open(csv_file, 'w', newline='', encoding='utf-8') as file:
             writer = csv.writer(file)
