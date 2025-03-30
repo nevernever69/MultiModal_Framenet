@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """
-gemma_analysis.py
+llava_analysis.py
 
-This script processes images using the Gemma model in parallel, saving results to a CSV.
+This script processes images using the LLaVA-1.5 model in parallel, saving results to a CSV.
 Uses optimized batch processing and better parallelization for H100 GPUs.
 Includes comprehensive performance statistics tracking.
 """
@@ -25,7 +25,7 @@ import numpy as np
 BATCH_SIZE = 4  # Adjust based on GPU memory
 MAX_NEW_TOKENS = 1000  # Reduced from 1200
 COMPILE_MODEL = True
-MODEL_ID = "unsloth/gemma-3-12b-it-bnb-4bit"
+MODEL_ID = "llava-hf/llava-1.5-13b-hf"  # Updated to LLaVA
 
 class ImageDataset(Dataset):
     """Dataset for batch processing of images"""
@@ -85,8 +85,13 @@ class StatsTracker:
     def get_progress_string(self):
         """Get a formatted progress string"""
         elapsed = time.time() - self.start_time
-        images_per_second = self.processed_images / elapsed if elapsed > 0 else 0
-        eta_seconds = (self.total_images - self.processed_images) / images_per_second if images_per_second > 0 else 0
+        if elapsed <= 0 or self.processed_images <= 0:
+            images_per_second = 0
+            eta_seconds = 0
+        else:
+            images_per_second = self.processed_images / elapsed
+            eta_seconds = (self.total_images - self.processed_images) / images_per_second if images_per_second > 0 else 0
+        
         eta_str = str(datetime.timedelta(seconds=int(eta_seconds)))
         
         return (f"Progress: {self.processed_images}/{self.total_images} images "
@@ -110,10 +115,10 @@ class StatsTracker:
         else:
             avg_image_time = min_image_time = max_image_time = median_image_time = p95_image_time = 0
         
-        # Calculate batch statistics
-        if self.batch_processing_times:
+        # Calculate batch statistics with safeguards for empty lists
+        if self.batch_processing_times and sum(self.batch_processing_times) > 0:
             avg_batch_time = np.mean(self.batch_processing_times)
-            avg_batch_size = np.mean(self.batch_sizes)
+            avg_batch_size = np.mean(self.batch_sizes) if self.batch_sizes else 0
             images_per_second = sum(self.batch_sizes) / sum(self.batch_processing_times)
         else:
             avg_batch_time = avg_batch_size = images_per_second = 0
@@ -176,7 +181,7 @@ class StatsTracker:
         res_stats = stats["resource_utilization"]
         
         print("\n" + "="*80)
-        print(f"GEMMA IMAGE PROCESSING COMPLETE - PERFORMANCE REPORT")
+        print(f"LLAVA IMAGE PROCESSING COMPLETE - PERFORMANCE REPORT")
         print("="*80)
         print(f"Total runtime: {stats['total_runtime_formatted']}")
         print(f"Images processed: {stats['processed_images']}/{stats['total_images']} ({stats['processed_images']/stats['total_images']*100:.1f}%)")
@@ -211,12 +216,12 @@ def create_optimized_pipeline():
         torch.cuda.empty_cache()
         gc.collect()
     
-    print(f"Loading Gemma model with pipeline...")
+    print(f"Loading LLaVA model with pipeline...")
     start_time = time.time()
     
-    # Use the standard pipeline approach which works with Gemma models
+    # Use the appropriate pipeline for LLaVA model
     pipe = pipeline(
-        "image-text-to-text", 
+        "image-to-text",  # LLaVA uses image-to-text pipeline
         model=MODEL_ID,
         torch_dtype=torch.bfloat16,
         device_map="auto"
@@ -246,81 +251,83 @@ def create_optimized_pipeline():
     return pipe
 
 def create_prompt(image_path):
-    """Creates the prompt structure for a given image"""
-    return [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image", "image": image_path},
-                {"type": "text", "text": """
-            You are a multimodal visual analysis expert assisting in the creation of a structured academic dataset based on user-uploaded news photographs.
+    """Creates the prompt structure for LLaVA model"""
+    # LLaVA requires a simpler prompt format
+    return {
+        "image": image_path,
+        "text": """You are a multimodal visual analysis expert assisting in the creation of a structured academic dataset based on user-uploaded news photographs.
 
-            You will be provided with a photograph sourced from a news article. The complexity of the image may range from simple (e.g., one person in a room) to complex (e.g., a protest or public gathering).
+You will be provided with a photograph sourced from a news article. The complexity of the image may range from simple (e.g., one person in a room) to complex (e.g., a protest or public gathering).
 
-            Please follow these steps to generate a structured output suitable for CSV export:
+Please follow these steps to generate a structured output suitable for CSV export:
 
-            ### **1. Entities & Relationships**
+### **1. Entities & Relationships**
 
-            - **Instructions:**
-            - Identify **all visually identifiable entities** in the image.
-            - For each entity, provide a natural, descriptive phrase followed by its tag in square brackets only for Entities & Relationships.
-            - **Every entity mentioned in a sentence must be individually tagged.** Do not skip entities; if a sentence mentions several objects, each must appear with its corresponding tag.
-            - Use a comma-separated format for multiple entities within a single sentence.
+- **Instructions:**
+- Identify **all visually identifiable entities** in the image.
+- For each entity, provide a natural, descriptive phrase followed by its tag in square brackets only for Entities & Relationships.
+- **Every entity mentioned in a sentence must be individually tagged.** Do not skip entities; if a sentence mentions several objects, each must appear with its corresponding tag.
+- Use a comma-separated format for multiple entities within a single sentence.
 
-            - **Example:**
-            - Use:
-            *"Man [person] wearing a red and black soccer jersey [clothing] , shorts [clothing], and socks [clothing], jumping and celebrating."*
+- **Example:**
+- Use:
+*"Man [person] wearing a red and black soccer jersey [clothing] , shorts [clothing], and socks [clothing], jumping and celebrating."*
 
-            - **Required Entities to Look for:**
-            - People [person]
-            - Animals [animal]
-            - Vehicles [vehicle]
-            - Objects [object]
-            - Places [place]
-            - Clothing & accessories [clothing], [accessory]
-            - Tools & equipment [tool], [equipment]
-            - Text and signs [text]
-            - Screens or digital displays [screen]
-            - Furniture & fixtures [furniture], [fixture]
-            - Food & drink [food], [drink]
-            - Logos and symbols [logo], [symbol]
-            - Groups or clusters [group]
-            - Money & payment items [money], [payment]
-            - Toys & play items [toy]
-            - Firearms [real_gun], [toy_gun]
-            - Musical instruments [musical_instrument]
-            - Cosmetics & beauty products [cosmetics]
-            - Art & artistic media [art]
-            - Plants & vegetation [plant]
+- **Required Entities to Look for:**
+- People [person]
+- Animals [animal]
+- Vehicles [vehicle]
+- Objects [object]
+- Places [place]
+- Clothing & accessories [clothing], [accessory]
+- Tools & equipment [tool], [equipment]
+- Text and signs [text]
+- Screens or digital displays [screen]
+- Furniture & fixtures [furniture], [fixture]
+- Food & drink [food], [drink]
+- Logos and symbols [logo], [symbol]
+- Groups or clusters [group]
+- Money & payment items [money], [payment]
+- Toys & play items [toy]
+- Firearms [real_gun], [toy_gun]
+- Musical instruments [musical_instrument]
+- Cosmetics & beauty products [cosmetics]
+- Art & artistic media [art]
+- Plants & vegetation [plant]
 
-            - **Format:**
-            - List each entity as a bullet point, following the natural order they appear or interact in the image.
+- **Format:**
+- List each entity as a bullet point, following the natural order they appear or interact in the image.
 
-            ### **2. Scene Description:**
+### **2. Scene Description:**
 
-            - Write a rich, detailed description of the scene.
-            - Include spatial relationships, background elements, and general setting/context relevant to identifying and localizing entities.
-            - Be objective and avoid culturally biased interpretations.
-            - Do not infer names or identities unless explicitly shown in the image (e.g., "man in red shirt" instead of "John").
-            - After writing the description in English, provide a Brazilian Portuguese translation of the same description.
-            - Maintain all entity labels (e.g., [person], [vehicle], [text]) unchanged and in their original positions within the translated version.
+- Write a rich, detailed description of the scene.
+- Include spatial relationships, background elements, and general setting/context relevant to identifying and localizing entities.
+- Be objective and avoid culturally biased interpretations.
+- Do not infer names or identities unless explicitly shown in the image (e.g., "man in red shirt" instead of "John").
+- After writing the description in English, provide a Brazilian Portuguese translation of the same description.
+- Maintain all entity labels (e.g., [person], [vehicle], [text]) unchanged and in their original positions within the translated version.
 
-            ### **3. Event Description:**
+### **3. Event Description:**
 
-            - Describe the main activity or event depicted.
-            - If ambiguous, provide up to three plausible interpretations, clearly separated (e.g., "Possibility 1: ...", "Possibility 2: ...").
-            - Focus on the purpose, intent, or core action of the image.
+- Describe the main activity or event depicted.
+- If ambiguous, provide up to three plausible interpretations, clearly separated (e.g., "Possibility 1: ...", "Possibility 2: ...").
+- Focus on the purpose, intent, or core action of the image.
 
-            ### **4. Objects List:**
+### **4. Objects List:**
 
-            - Provide an explicit, exhaustive list of objects detected in the image without tags.
-            - Ensure all objects referenced in 'Entities & Relationships' are listed here.
+- Provide an explicit, exhaustive list of objects detected in the image without tags.
+- Ensure all objects referenced in 'Entities & Relationships' are listed here.
 
-            **Ensure all sections are well-structured, labeled, and formatted as bullet points.**
-                """}
-            ]
-        }
-    ]
+**Ensure all sections are well-structured, labeled, and formatted as bullet points.**"""
+    }
+
+def create_batch_prompts(image_paths):
+    """Creates a batch of prompts in the format expected by LLaVA"""
+    batch_prompts = []
+    for img_path in image_paths:
+        prompt = create_prompt(img_path)
+        batch_prompts.append(prompt)
+    return batch_prompts
 
 def extract_details(response_text):
     """Extracts structured sections from the response."""
@@ -330,16 +337,45 @@ def extract_details(response_text):
         ("event_description", r"### \*\*3\.\s*Event Description.*?\*\*"),
         ("objects_list", r"### \*\*4\.\s*Objects List.*?\*\*")
     ]
-    header_starts = {key: re.search(pat, response_text).start() for key, pat in headers if re.search(pat, response_text)}
-    header_ends = {key: re.search(pat, response_text).end() for key, pat in headers if re.search(pat, response_text)}
-    sorted_keys = sorted(header_starts, key=header_starts.get)
+    
+    # Add fallback patterns for slightly different formats
+    fallback_headers = [
+        ("entities_relationships", r"### 1\.\s*Entities & Relationships"),
+        ("scene_description", r"### 2\.\s*Scene Description"),
+        ("event_description", r"### 3\.\s*Event Description"),
+        ("objects_list", r"### 4\.\s*Objects List")
+    ]
+    
+    # Try primary patterns first
+    header_starts = {}
+    header_ends = {}
+    
+    for key, pat in headers:
+        match = re.search(pat, response_text)
+        if match:
+            header_starts[key] = match.start()
+            header_ends[key] = match.end()
+    
+    # If some headers weren't found, try fallback patterns
+    for key, pat in fallback_headers:
+        if key not in header_starts:
+            match = re.search(pat, response_text)
+            if match:
+                header_starts[key] = match.start()
+                header_ends[key] = match.end()
+    
     details = {}
-    for i, key in enumerate(sorted_keys):
-        start = header_ends[key]
-        end = header_starts[sorted_keys[i + 1]] if i + 1 < len(sorted_keys) else None
-        text = response_text[start:end].strip() if end else response_text[start:].strip()
-        lines = [re.sub(r"^\*\s+", "", line) for line in text.split("\n") if line.strip()]
-        details[key] = "\n".join(lines)
+    if header_starts:
+        sorted_keys = sorted(header_starts, key=header_starts.get)
+        
+        for i, key in enumerate(sorted_keys):
+            start = header_ends[key]
+            end = header_starts[sorted_keys[i + 1]] if i + 1 < len(sorted_keys) else None
+            text = response_text[start:end].strip() if end else response_text[start:].strip()
+            lines = [re.sub(r"^\*\s+", "", line) for line in text.split("\n") if line.strip()]
+            details[key] = "\n".join(lines)
+    
+    # Ensure all keys are present in results
     return {key: details.get(key, "No data available") for key, _ in headers}
 
 def remove_markdown_bolding(text):
@@ -349,17 +385,19 @@ def remove_markdown_bolding(text):
 def process_batch(batch_image_paths, pipe, stats_tracker):
     """Process a batch of images using the pipeline"""
     results = []
-    batch_prompts = [create_prompt(img_path) for img_path in batch_image_paths]
     
     try:
+        # Create batch prompts (proper format for LLaVA)
+        batch_prompts = create_batch_prompts(batch_image_paths)
+        
         # Generate responses for the entire batch
         with torch.inference_mode():
             batch_start_time = time.time()
             batch_responses = pipe(
                 batch_prompts,
                 max_new_tokens=MAX_NEW_TOKENS,
-                batch_size=BATCH_SIZE,
                 do_sample=False,  # Deterministic generation is faster
+                batch_size=BATCH_SIZE  # Explicit batch size
             )
             batch_duration = time.time() - batch_start_time
         
@@ -368,27 +406,36 @@ def process_batch(batch_image_paths, pipe, stats_tracker):
         
         # Process each response in the batch
         for i, (img_path, response) in enumerate(zip(batch_image_paths, batch_responses)):
-            if response and "generated_text" in response[0] and len(response[0]["generated_text"]) > 0:
-                analysis = response[0]["generated_text"][-1]["content"]
-                analysis_data = extract_details(analysis)
-                cleaned_data = {k: remove_markdown_bolding(v) for k, v in analysis_data.items()}
-                
-                # Calculate estimated time per image
-                image_time = batch_duration / len(batch_image_paths)
-                stats_tracker.add_image_time(image_time)
-                
-                results.append({
-                    'image_path': img_path,
-                    'status': 'success',
-                    'entities_relationships': cleaned_data["entities_relationships"],
-                    'scene_description': cleaned_data["scene_description"],
-                    'event_description': cleaned_data["event_description"],
-                    'objects_list': cleaned_data["objects_list"],
-                    'duration': image_time
-                })
-                success_count += 1
-            else:
-                results.append({'image_path': img_path, 'status': 'failed'})
+            try:
+                # LLaVA typically returns a list of generated texts
+                if response and isinstance(response, list) and len(response) > 0:
+                    # Get the generated text (format may vary)
+                    analysis = response[0]['generated_text'] if isinstance(response[0], dict) else response[0]
+                    
+                    # Extract structured data
+                    analysis_data = extract_details(analysis)
+                    cleaned_data = {k: remove_markdown_bolding(v) for k, v in analysis_data.items()}
+                    
+                    # Calculate estimated time per image
+                    image_time = batch_duration / len(batch_image_paths)
+                    stats_tracker.add_image_time(image_time)
+                    
+                    results.append({
+                        'image_path': img_path,
+                        'status': 'success',
+                        'entities_relationships': cleaned_data["entities_relationships"],
+                        'scene_description': cleaned_data["scene_description"],
+                        'event_description': cleaned_data["event_description"],
+                        'objects_list': cleaned_data["objects_list"],
+                        'duration': image_time
+                    })
+                    success_count += 1
+                else:
+                    results.append({'image_path': img_path, 'status': 'failed', 'error': 'Empty or invalid response'})
+                    fail_count += 1
+            except Exception as e:
+                print(f"Error processing response for {img_path}: {e}")
+                results.append({'image_path': img_path, 'status': 'failed', 'error': str(e)})
                 fail_count += 1
         
         # Update batch statistics
@@ -397,8 +444,9 @@ def process_batch(batch_image_paths, pipe, stats_tracker):
     except Exception as e:
         print(f"Error processing batch: {e}")
         # Return failed status for all images in the batch
-        results.extend([{'image_path': img_path, 'status': 'failed'} for img_path in batch_image_paths])
-        stats_tracker.add_batch_result(len(batch_image_paths), 0, 0, len(batch_image_paths))
+        for img_path in batch_image_paths:
+            results.append({'image_path': img_path, 'status': 'failed', 'error': str(e)})
+        stats_tracker.add_batch_result(len(batch_image_paths), 0.1, 0, len(batch_image_paths))  # 0.1 to avoid division by zero
     
     return results
 
@@ -415,7 +463,7 @@ def process_images_in_parallel(image_paths, pipe, stats_tracker, batch_size=BATC
         
         # Periodically save stats
         if ((i//batch_size)+1) % 5 == 0 or i+batch_size >= len(image_paths):
-            stats_file = f"gemma_processing_stats_progress.json"
+            stats_file = f"llava_processing_stats_progress.json"
             stats_tracker.save_stats_to_file(stats_file)
             
     return results
@@ -427,7 +475,7 @@ def main(image_paths, output_csv, batch_size=BATCH_SIZE):
     
     # Print configuration information
     print(f"\n{'='*50}")
-    print(f"GEMMA IMAGE PROCESSING")
+    print(f"LLAVA IMAGE PROCESSING")
     print(f"{'='*50}")
     print(f"Images to process: {len(image_paths)}")
     print(f"Batch size: {batch_size}")
@@ -459,6 +507,8 @@ def main(image_paths, output_csv, batch_size=BATCH_SIZE):
                         result['objects_list'],
                         f"{result['duration']:.2f}"
                     ])
+                else:
+                    print(f"Failed to process {result['image_path']}: {result.get('error', 'Unknown error')}")
             
             # Process complete - print final report
             stats_tracker.print_final_report()
@@ -487,11 +537,10 @@ def optimize_batch_size():
     total_mem = torch.cuda.get_device_properties(0).total_memory
     total_mem_gb = total_mem / (1024**3)
     
-    # Very rough heuristic - adjust based on model
-    if total_mem_gb > 45:  # H100 likely has >45GB memory
-        # For large GPUs, try larger batch sizes
+    # Rough heuristic for LLaVA model
+    if total_mem_gb > 80:  # H100 with 80GB
         return 8
-    elif total_mem_gb > 35:
+    elif total_mem_gb > 45:  # H100 with ~48GB
         return 6
     elif total_mem_gb > 24:
         return 4
