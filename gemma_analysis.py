@@ -199,7 +199,7 @@ def main():
             end_time = time.time()  # End timing after analysis
             duration = end_time - start_time  # Calculate duration
 
-            print(f"Analysis for {image_path} (Time Taken: {duration:.2f} seconds):\n{analysis}")
+            print(f"Analysis for {image_path} (Time Taken: {duration:.2f} seconds):\n")
 
             if not analysis or analysis.strip() == "":
                 print(f"Warning: No response for {image_path}. Skipping.")
