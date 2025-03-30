@@ -7,7 +7,7 @@
 #SBATCH --time=05:00:00                      # Adjust runtime as needed
 #SBATCH --mem=64G
 #SBATCH --output=/scratch/users/axb2032/MultiModal_Framenet/logs/%j.out
-#SBATCH --error=/scratch/users/axb2032/Multimodal_Framenet/logs/%j.err
+#SBATCH --error=/scratch/users/axb2032/MultiModal_Framenet/logs/%j.err
 #SBATCH --mail-user=axb2032@case.edu   # Replace with your email address
 #SBATCH --mail-type=ALL
 

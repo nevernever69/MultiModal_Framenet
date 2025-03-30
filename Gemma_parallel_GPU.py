@@ -184,7 +184,7 @@ def process_image(task):
 
 if __name__ == '__main__':
     # Generate list of image paths; adjust as needed
-    image_paths = [f'images/pipe.model{i:05d}.jpg' for i in range(1, 11)]
+    image_paths = [f'images/pipe.model{i:05d}.jpg' for i in range(1, 500)]
     
     # Create tasks as tuples: (image_path, gpu_id) using round-robin assignment.
     tasks = [(img, i % 2) for i, img in enumerate(image_paths)]
