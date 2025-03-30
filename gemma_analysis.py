@@ -13,6 +13,9 @@ import csv
 import os
 import re
 import time
+from torch.utils.data import Dataset, DataLoader
+from PIL import Image
+from torchvision import transforms
 
 # Load the Gemma model pipeline with GPU acceleration and 4-bit quantization
 pipe = pipeline(
@@ -21,24 +24,29 @@ pipe = pipeline(
     torch_dtype=torch.bfloat16               # Optimize memory usage
 )
 
-def analyze_image(image_path, pipe):
-    """
-    Analyzes an image using the Gemma model and returns the assistant's text response.
+class NewsImageDataset(Dataset):
+    def __init__(self, image_dir, transform=None):
+        self.image_dir = image_dir
+        self.image_files = sorted([os.path.join(image_dir, f) for f in os.listdir(image_dir) if f.endswith('.jpg')])
+        self.transform = transform
 
-    Args:
-        image_path (str): Path to the image file.
-        pipe: The loaded Transformers pipeline for image-text-to-text tasks.
+    def __len__(self):
+        return len(self.image_files)
 
-    Returns:
-        str: Generated text response or an empty string if an error occurs.
-    """
-    # Define the prompt as a list of messages
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image", "image": image_path},
-                {"type": "text", "text": """
+    def __getitem__(self, idx):
+        image_path = self.image_files[idx]
+        image = Image.open(image_path).convert("RGB")
+        if self.transform:
+            image = self.transform(image)
+        return image, image_path
+
+# Create dataset and dataloader
+transform = transforms.Compose([
+    transforms.ToTensor()  # Convert PIL Image to tensor; adjust if needed by the pipeline
+])
+dataset = NewsImageDataset('images')
+dataloader = DataLoader(dataset, batch_size=4, shuffle=False, num_workers=4)
+PROMPT_TEXT = """
             You are a multimodal visual analysis expert assisting in the creation of a structured academic dataset based on user-uploaded news photographs.
 
             You will be provided with a photograph sourced from a news article. The complexity of the image may range from simple (e.g., one person in a room) to complex (e.g., a protest or public gathering).
@@ -103,41 +111,60 @@ def analyze_image(image_path, pipe):
             - Ensure all objects referenced in 'Entities & Relationships' are listed here.
 
             **Ensure all sections are well-structured, labeled, and formatted as bullet points.**
-                """}
-            ]
-        }
-    ]
+                """
 
+def analyze_images_batch(batch, pipe):
+    """
+    Processes a batch of images with their associated paths.
+    Each image is wrapped in the prompt messages and passed to the pipeline.
+    Returns a list of tuples (image_path, analysis_text).
+    """
+    responses = []
+    # Prepare messages for each image in the batch
+    messages_batch = []
+    image_paths = []
+    for image, image_path in batch:
+        # For this example, we assume that the pipeline accepts a PIL image or tensor as "image"
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image},
+                {"type": "text", "text": PROMPT_TEXT}
+            ]
+        }]
+        messages_batch.append(messages)
+        image_paths.append(image_path)
+    
     try:
-        # Generate response from the pipeline
-        response = pipe(
-            text=messages,
-            max_new_tokens=1200  # Limit the output tokens
-        )
-        # Extract the assistant's response text
-        if response and "generated_text" in response[0] and len(response[0]["generated_text"]) > 0:
-            return response[0]["generated_text"][-1]["content"]
-        else:
-            return ""
+        # Process the entire batch. The pipeline must support batched input.
+        batch_responses = pipe(text=messages_batch, max_new_tokens=1200)
     except Exception as e:
-        print(f"Error analyzing image {image_path}: {e}")
-        return ""
+        print(f"Error processing batch: {e}")
+        return []
+    
+    for resp, image_path in zip(batch_responses, image_paths):
+        try:
+            # Extract the response text assuming the output structure is similar to the original code
+            analysis_text = resp[0]["generated_text"][-1]["content"]
+        except Exception as e:
+            print(f"Error extracting response for {image_path}: {e}")
+            analysis_text = ""
+        responses.append((image_path, analysis_text))
+    return responses
 
 def extract_details(response_text):
     """
     Extracts structured sections from the analysis response.
-
-    Returns:
-        dict: Dictionary with keys for each section.
+    Returns a dictionary with keys for each section.
     """
-    # Define section headers and their keys
+    # Define section headers and regex patterns
     headers = [
         ("entities_relationships", r"### \*\*1\.\s*Entities & Relationships.*?\*\*"),
         ("scene_description", r"### \*\*2\.\s*Scene Description.*?\*\*"),
         ("event_description", r"### \*\*3\.\s*Event Description.*?\*\*"),
         ("objects_list", r"### \*\*4\.\s*Objects List.*?\*\*")
     ]
-
+    
     header_starts = {}
     header_ends = {}
     for key, pattern in headers:
@@ -146,7 +173,7 @@ def extract_details(response_text):
             header_starts[key] = match.start()
             header_ends[key] = match.end()
 
-    # Sort sections by their starting position
+    # Sort sections by their starting positions
     sorted_keys = sorted(header_starts, key=header_starts.get)
     details = {}
     for i, key in enumerate(sorted_keys):
@@ -154,6 +181,7 @@ def extract_details(response_text):
         end = header_starts[sorted_keys[i + 1]] if i + 1 < len(sorted_keys) else None
         section_text = response_text[start:end].strip() if end else response_text[start:].strip()
 
+        # Clean up bullet points and markdown formatting
         if key == "scene_description":
             cleaned_text = section_text
         else:
@@ -162,10 +190,9 @@ def extract_details(response_text):
             if key == "event_description":
                 cleaned_lines = [re.sub(r"\*\*(Possibility \d+:)\*\*", r"\1", line) for line in cleaned_lines]
             cleaned_text = "\n".join(cleaned_lines)
-
         details[key] = cleaned_text
 
-    # Ensure all sections exist
+    # Ensure all sections are present in the returned dict
     for key, _ in headers:
         if key not in details:
             details[key] = "No data available"
@@ -185,39 +212,34 @@ def main():
     # Define CSV output file path
     csv_file = 'structured_image_analysis_results.csv'
 
+def main():
+    # Define CSV output file path
+    csv_file = 'structured_image_analysis_results.csv'
+    
     with open(csv_file, mode='w', newline='', encoding='utf-8') as file:
         writer = csv.writer(file)
         writer.writerow(["Image Path", "Entities & Relationships", "Scene Description", "Event Description", "Objects List"])
-
-        for image_path in image_paths:
-            if not os.path.exists(image_path):
-                print(f"Image path {image_path} does not exist. Skipping.")
-                continue
-
-            start_time = time.time()  # Start timing before analysis
-            analysis = analyze_image(image_path, pipe)
-            end_time = time.time()  # End timing after analysis
-            duration = end_time - start_time  # Calculate duration
-
-            print(f"Analysis for {image_path} (Time Taken: {duration:.2f} seconds):\n")
-
-            if not analysis or analysis.strip() == "":
-                print(f"Warning: No response for {image_path}. Skipping.")
-                continue
-
-            try:
-                analysis_data = extract_details(analysis)
-                cleaned_data = {key: remove_markdown_bolding(value) for key, value in analysis_data.items()}
-                writer.writerow([
-                    image_path,
-                    cleaned_data["entities_relationships"],
-                    cleaned_data["scene_description"],
-                    cleaned_data["event_description"],
-                    cleaned_data["objects_list"]
-                ])
-            except Exception as e:
-                print(f"Error processing analysis for {image_path}: {e}")
-
+        
+        for batch in dataloader:
+            # Each batch is a tuple: (images, image_paths)
+            batch_results = analyze_images_batch(list(zip(*batch)), pipe)
+            for image_path, analysis in batch_results:
+                if not analysis or analysis.strip() == "":
+                    print(f"Warning: No response for {image_path}. Skipping.")
+                    continue
+                try:
+                    analysis_data = extract_details(analysis)
+                    cleaned_data = {key: remove_markdown_bolding(value) for key, value in analysis_data.items()}
+                    writer.writerow([
+                        image_path,
+                        cleaned_data["entities_relationships"],
+                        cleaned_data["scene_description"],
+                        cleaned_data["event_description"],
+                        cleaned_data["objects_list"]
+                    ])
+                except Exception as e:
+                    print(f"Error processing analysis for {image_path}: {e}")
+    
     print(f"Analysis complete. Results saved to {csv_file}")
 
 if __name__ == '__main__':
