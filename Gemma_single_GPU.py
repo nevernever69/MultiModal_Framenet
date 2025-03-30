@@ -2,9 +2,8 @@
 """
 gemma_analysis.py
 
-This script loads the Gemma model pipeline and processes a set of images,
-extracting structured details and saving the results to a CSV file using multiprocessing
-for efficient parallel processing on an H100 GPU.
+This script processes images using the Gemma model in parallel, saving results to a CSV.
+It uses the fast image processor for improved performance and includes timing and progress stats.
 """
 
 import os
@@ -16,7 +15,7 @@ import re
 from multiprocessing import Pool
 import time
 
-# Global variable for the pipeline, initialized as None in each worker process
+# Global pipeline variable, initialized in each worker
 pipe = None
 
 def analyze_image(image_path, pipe):
@@ -150,8 +149,9 @@ def process_image(image_path):
     global pipe
     try:
         if pipe is None:
-            pipe = pipeline("image-text-to-text", model="unsloth/gemma-3-12b-it-bnb-4bit", torch_dtype=torch.bfloat16)
-            # pipe.model = torch.compile(pipe.model)  # Optional: Uncomment if supported
+            # Load the pipeline with use_fast=True for faster image processing
+            pipe = pipeline("image-text-to-text", model="unsloth/gemma-3-12b-it-bnb-4bit", torch_dtype=torch.bfloat16, use_fast=True)
+            pipe.model = torch.compile(pipe.model)  # Optional: Uncomment if supported
         start_time = time.time()
         analysis = analyze_image(image_path, pipe)
         if analysis and analysis.strip():
@@ -174,9 +174,9 @@ def process_image(image_path):
 
 if __name__ == '__main__':
     # Example image paths (adjust as needed)
-    image_paths = [f'images/{i:05d}.jpg' for i in range(1, 13001)]
+    image_paths = [f'images/pipe.model{i:05d}.jpg' for i in range(1, 11)]  # For 10 images
     csv_file = 'structured_image_analysis_results.csv'
-    num_workers = 10  # Adjust based on GPU capacity
+    num_workers = 1  # Adjust based on GPU capacity
     total_images = len(image_paths)
     counter = 0
 
