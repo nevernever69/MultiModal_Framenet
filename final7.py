@@ -16,33 +16,23 @@ import time
 from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 
-# This will be used to distribute work across GPUs
-def get_gpu_id(worker_id, num_gpus):
-    """
-    Maps a worker ID to a specific GPU ID.
-    
-    Args:
-        worker_id (int): The worker's ID
-        num_gpus (int): Total number of available GPUs
-        
-    Returns:
-        int: The GPU ID to use
-    """
-    return worker_id % num_gpus
-
 # Global pipeline variable, initialized in each worker
 pipe = None
 
-def initialize_worker(worker_id, num_gpus):
+def initialize_worker(worker_id):
     """
     Initialize the worker with the correct GPU assignment.
     
     Args:
         worker_id (int): The ID of this worker
-        num_gpus (int): Total number of available GPUs
     """
     global pipe
-    gpu_id = get_gpu_id(worker_id, num_gpus)
+    
+    # Number of GPUs available
+    num_gpus = 2
+    
+    # Map worker to GPU
+    gpu_id = worker_id % num_gpus
     print(f"Worker {worker_id} assigned to GPU {gpu_id}")
     
     # Set the visible device for this process
@@ -64,20 +54,19 @@ def initialize_worker(worker_id, num_gpus):
         print(f"Worker {worker_id} on GPU {gpu_id}: Model successfully compiled")
     except Exception as e:
         print(f"Worker {worker_id} on GPU {gpu_id}: Model compilation skipped - {str(e)}")
-    
-    return worker_id
 
-def analyze_image(image_path, pipe):
+def analyze_image(image_path):
     """
     Analyzes an image using the Gemma model and returns the assistant's text response.
 
     Args:
         image_path (str): Path to the image file.
-        pipe: The loaded Transformers pipeline for image-text-to-text tasks.
 
     Returns:
         str: Generated text response or an empty string if an error occurs.
     """
+    global pipe
+    
     # Define the prompt as a list of messages
     messages = [
         {
@@ -193,23 +182,27 @@ def remove_markdown_bolding(text):
     """Removes Markdown bolding from text."""
     return re.sub(r'\*\*(.*?)\*\*', r'\1', text)
 
-def process_image(args):
+def process_image(image_path):
     """
     Processes an image and returns structured data with timing.
     
     Args:
-        args (tuple): (image_path, worker_id)
+        image_path (str): Path to the image file
     """
-    image_path, worker_id = args
-    
     try:
         # The pipeline should already be initialized by initialize_worker
         start_time = time.time()
-        analysis = analyze_image(image_path, pipe)
+        analysis = analyze_image(image_path)
+        
         if analysis and analysis.strip():
             analysis_data = extract_details(analysis)
             cleaned_data = {k: remove_markdown_bolding(v) for k, v in analysis_data.items()}
             duration = time.time() - start_time
+            
+            # Get process/worker ID for logging
+            import os
+            worker_id = os.getpid()
+            
             return {
                 'image_path': image_path,
                 'status': 'success',
@@ -220,19 +213,15 @@ def process_image(args):
                 'duration': duration,
                 'worker_id': worker_id
             }
-        return {'image_path': image_path, 'status': 'failed', 'worker_id': worker_id}
+        return {'image_path': image_path, 'status': 'failed', 'worker_id': os.getpid()}
     except Exception as e:
-        print(f"Worker {worker_id}: Error processing {image_path}: {e}")
-        return {'image_path': image_path, 'status': 'failed', 'worker_id': worker_id}
-
-def initializer(worker_id, num_gpus):
-    """Wrapper function to pass arguments to initialize_worker"""
-    return initialize_worker(worker_id, num_gpus)
+        print(f"Worker {os.getpid()}: Error processing {image_path}: {e}")
+        return {'image_path': image_path, 'status': 'failed', 'worker_id': os.getpid()}
 
 if __name__ == '__main__':
     # Configuration
     num_gpus = 2  # Number of H100 GPUs available
-    num_workers = num_gpus * 1  # Typically 1 worker per GPU for large models like Gemma
+    num_workers = num_gpus  # One worker per GPU for large models like Gemma
     
     # Example image paths (adjust as needed)
     image_paths = [f'images/pipe.model{i:05d}.jpg' for i in range(1, 13001)]  # For 13k+ images
@@ -241,40 +230,42 @@ if __name__ == '__main__':
     total_images = len(image_paths)
     processed_count = 0
     
-    # Prepare worker arguments - each worker gets its own ID
-    worker_args = [(i, num_gpus) for i in range(num_workers)]
-    
-    # Distribute images across workers
-    image_worker_pairs = []
-    for i, img_path in enumerate(image_paths):
-        worker_id = i % num_workers
-        image_worker_pairs.append((img_path, worker_id))
-    
-    with ProcessPoolExecutor(max_workers=num_workers, initializer=initializer, initargs=worker_args) as executor:
+    # Create and configure the process pool with initializer
+    with ProcessPoolExecutor(max_workers=num_workers, initializer=initialize_worker, 
+                            initargs=(list(range(num_workers)),)) as executor:
+        # Open CSV file for writing results
         with open(csv_file, 'w', newline='', encoding='utf-8') as file:
             writer = csv.writer(file)
-            writer.writerow(["Image Path", "Entities & Relationships", "Scene Description", "Event Description", "Objects List", "Processing Time (s)", "Worker ID", "GPU ID"])
+            # CSV header - only analysis data, no process info
+            writer.writerow(["Image Path", "Entities & Relationships", "Scene Description", "Event Description", "Objects List"])
             
-            # Process images and gather results
-            for result in executor.map(process_image, image_worker_pairs):
-                if result['status'] == 'success':
-                    writer.writerow([
-                        result['image_path'],
-                        result['entities_relationships'],
-                        result['scene_description'],
-                        result['event_description'],
-                        result['objects_list'],
-                        f"{result['duration']:.2f}",
-                        result['worker_id'],
-                        get_gpu_id(result['worker_id'], num_gpus)
-                    ])
-                    processed_count += 1
-                    
-                    # Print progress update
-                    if processed_count % 10 == 0 or processed_count == total_images:
-                        print(f"Progress: {processed_count}/{total_images} images ({processed_count/total_images*100:.1f}%)")
-                        print(f"Last processed: {result['image_path']} by Worker {result['worker_id']} on GPU {get_gpu_id(result['worker_id'], num_gpus)} in {result['duration']:.2f} seconds")
-                else:
-                    print(f"Failed to process {result['image_path']} on Worker {result['worker_id']}")
+            # Submit all image processing tasks
+            future_to_image = {executor.submit(process_image, img_path): img_path for img_path in image_paths}
+            
+            # Process results as they complete
+            import concurrent.futures
+            for future in concurrent.futures.as_completed(future_to_image):
+                img_path = future_to_image[future]
+                try:
+                    result = future.result()
+                    if result['status'] == 'success':
+                        # Write only the analysis data to CSV
+                        writer.writerow([
+                            result['image_path'],
+                            result['entities_relationships'],
+                            result['scene_description'],
+                            result['event_description'],
+                            result['objects_list']
+                        ])
+                        processed_count += 1
+                        
+                        # Log processing details to console
+                        if processed_count % 10 == 0 or processed_count == 1 or processed_count == total_images:
+                            print(f"Progress: {processed_count}/{total_images} images ({processed_count/total_images*100:.1f}%)")
+                            print(f"Last processed: {result['image_path']} by Worker {result['worker_id']} in {result['duration']:.2f} seconds")
+                    else:
+                        print(f"Failed to process {result['image_path']}")
+                except Exception as exc:
+                    print(f"Processing of {img_path} generated an exception: {exc}")
     
     print(f"Processing complete. {processed_count} images successfully processed.")
