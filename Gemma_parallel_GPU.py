@@ -78,28 +78,34 @@ def analyze_image(image_path, pipe):
             - **Format:**
             - List each entity as a bullet point, following the natural order they appear or interact in the image.
 
-            ### **2. Scene Description:**
+            ### **2. Scene Description (English):**
 
             - Write a rich, detailed description of the scene.
             - Include spatial relationships, background elements, and general setting/context relevant to identifying and localizing entities.
             - Be objective and avoid culturally biased interpretations.
             - Do not infer names or identities unless explicitly shown in the image (e.g., "man in red shirt" instead of "John").
-            - After writing the description in English, provide a Brazilian Portuguese translation of the same description.
-            - Maintain all entity labels (e.g., [person], [vehicle], [text]) unchanged and in their original positions within the translated version.
+            
+            ### **3. Scene Description (Brazilian Portuguese):**
 
-            ### **3. Event Description:**
+            - Provide a Brazilian Portuguese translation of the scene description.
+            - The translation should maintain all entity labels (e.g., [person], [vehicle], [text]) unchanged.
+            - The content should mirror the English version in detail and context.
+
+
+            ### **4. Event Description:**
 
             - Describe the main activity or event depicted.
             - If ambiguous, provide up to three plausible interpretations, clearly separated (e.g., "Possibility 1: ...", "Possibility 2: ...").
             - Focus on the purpose, intent, or core action of the image.
 
-            ### **4. Objects List:**
+
+            ### **5. Objects List:**
 
             - Provide an explicit, exhaustive list of objects detected in the image without tags.
             - Ensure all objects referenced in 'Entities & Relationships' are listed here.
 
-            **Ensure all sections are well-structured, labeled, and formatted as bullet points.**
-                """}
+            **Ensure all sections are well-structured, labeled, and formatted as bullet points.**                
+            """}
             ]
         }
     ]
@@ -120,9 +126,10 @@ def extract_details(response_text):
     """Extracts structured sections from the response."""
     headers = [
         ("entities_relationships", r"### \*\*1\.\s*Entities & Relationships.*?\*\*"),
-        ("scene_description", r"### \*\*2\.\s*Scene Description.*?\*\*"),
-        ("event_description", r"### \*\*3\.\s*Event Description.*?\*\*"),
-        ("objects_list", r"### \*\*4\.\s*Objects List.*?\*\*")
+        ("scene_description_eng", r"### \*\*2\.\s*Scene Description \(English\).*?\*\*"),
+        ("scene_description_pt", r"### \*\*3\.\s*Scene Description \(Brazilian Portuguese\).*?\*\*"),
+        ("event_description", r"### \*\*4\.\s*Event Description.*?\*\*"),
+        ("objects_list", r"### \*\*5\.\s*Objects List.*?\*\*")
     ]
     header_starts = {key: re.search(pat, response_text).start() for key, pat in headers if re.search(pat, response_text)}
     header_ends = {key: re.search(pat, response_text).end() for key, pat in headers if re.search(pat, response_text)}
@@ -174,7 +181,8 @@ def process_image(task):
             'image_path': image_path,
             'status': 'success',
             'entities_relationships': cleaned_data["entities_relationships"],
-            'scene_description': cleaned_data["scene_description"],
+            'scene_description_eng': cleaned_data["scene_description_eng"],
+            'scene_description_pt': cleaned_data["scene_description_pt"],
             'event_description': cleaned_data["event_description"],
             'objects_list': cleaned_data["objects_list"],
             'duration': duration,
@@ -197,14 +205,23 @@ if __name__ == '__main__':
     with Pool(processes=2) as pool:
         with open(csv_file, 'w', newline='', encoding='utf-8') as file:
             writer = csv.writer(file)
-            writer.writerow(["Image Path", "GPU", "Entities & Relationships", "Scene Description", "Event Description", "Objects List"])
+            writer.writerow([
+                "Image Path", 
+                "GPU", 
+                "Entities & Relationships", 
+                "Scene Description (English)", 
+                "Scene Description (Brazilian Portuguese)", 
+                "Event Description", 
+                "Objects List"
+            ])
             for result in pool.imap_unordered(process_image, tasks):
                 if result['status'] == 'success':
                     writer.writerow([
                         result['image_path'],
                         result['gpu'],
                         result['entities_relationships'],
-                        result['scene_description'],
+                        result['scene_description_eng'],
+                        result['scene_description_pt'],
                         result['event_description'],
                         result['objects_list']
                     ])

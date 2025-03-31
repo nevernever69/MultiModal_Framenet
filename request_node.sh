@@ -22,7 +22,7 @@ cd $TMP_WORK_DIR/$PROG_DIR
 source venv/bin/activate
 
 # --- Run the Python Analysis Script ---
-./new.sh
+#./Download_dataset_extract.sh
 python Gemma_parallel_GPU.py
 
 # --- Transfer Results Back to Home Directory ---
