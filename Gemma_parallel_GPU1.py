@@ -154,6 +154,7 @@ def remove_markdown_bolding(text):
     """Removes Markdown bolding from text."""
     return re.sub(r'\*\*(.*?)\*\*', r'\1', text)
 
+
 def process_image(task):
     """
     Processes an image on the designated GPU and returns structured data with timing.
@@ -164,7 +165,7 @@ def process_image(task):
 
     # Set the visible GPU for this process so that only the desired GPU is used.
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-    torch.cuda.set_device(0)  # In the context of this process, the chosen GPU is now device 0
+    torch.cuda.set_device(0)  # Now device 0 refers to the selected GPU
 
     if pipe is None:
         # Load the pipeline without the device argument
@@ -187,8 +188,8 @@ def process_image(task):
             'image_path': image_path,
             'status': 'success',
             'entities_relationships': cleaned_data["entities_relationships"],
-            'scene_description_english': cleaned_data["scene_description_english"],
-            'scene_description_portuguese': cleaned_data["scene_description_portuguese"],
+            'scene_description_eng': cleaned_data["scene_description_eng"],
+            'scene_description_pt': cleaned_data["scene_description_pt"],
             'event_description': cleaned_data["event_description"],
             'objects_list': cleaned_data["objects_list"],
             'duration': duration,
@@ -197,24 +198,23 @@ def process_image(task):
     return {'image_path': image_path, 'status': 'failed', 'gpu': gpu_id}
 
 if __name__ == '__main__':
-    # Generate list of image paths; adjust as needed
-    image_paths = [f'images/{i:05d}.jpg' for i in range(1, 4)]
-    
-    # Create tasks as tuples: (image_path, gpu_id) using round-robin assignment.
+    image_paths = [f'images/{i:05d}.jpg' for i in range(1, 5)]
     tasks = [(img, i % 2) for i, img in enumerate(image_paths)]
-    
-    csv_file = 'structured_image_analysis_results.csv'
+    csv_file = 'structured_image_analysis_results_finals.csv'
     total_images = len(tasks)
     counter = 0
 
-    # Create a pool with 2 workers.
     with Pool(processes=2) as pool:
         with open(csv_file, 'w', newline='', encoding='utf-8') as file:
             writer = csv.writer(file)
             writer.writerow([
-                "Image Path", "GPU", "Entities & Relationships", 
-                "Scene Description (English)", "Scene Description (Brazilian Portuguese)",
-                "Event Description", "Objects List"
+                "Image Path", 
+                "GPU", 
+                "Entities & Relationships", 
+                "Scene Description (English)", 
+                "Scene Description (Brazilian Portuguese)", 
+                "Event Description", 
+                "Objects List"
             ])
             for result in pool.imap_unordered(process_image, tasks):
                 if result['status'] == 'success':
@@ -222,8 +222,8 @@ if __name__ == '__main__':
                         result['image_path'],
                         result['gpu'],
                         result['entities_relationships'],
-                        result['scene_description_english'],
-                        result['scene_description_portuguese'],
+                        result['scene_description_eng'],
+                        result['scene_description_pt'],
                         result['event_description'],
                         result['objects_list']
                     ])
@@ -231,3 +231,5 @@ if __name__ == '__main__':
                     print(f"Processed {result['image_path']} on GPU {result['gpu']} in {result['duration']:.2f} seconds. Total processed: {counter}/{total_images}")
                 else:
                     print(f"Failed to process {result['image_path']} on GPU {result['gpu']}")
+
+    print(f"Analysis complete. Results saved to {csv_file}")
