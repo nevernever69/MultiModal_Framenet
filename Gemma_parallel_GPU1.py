@@ -74,21 +74,18 @@ def analyze_image(image_path, pipe):
             - Cosmetics & beauty products [cosmetics]
             - Art & artistic media [art]
             - Plants & vegetation [plant]
-                 
+
             - **Format:**
             - List each entity as a bullet point, following the natural order they appear or interact in the image.
 
-            ### **2. Scene Description (English):**
+            ### **2. Scene Description:**
 
-            - Write a rich, detailed description of the scene in English.
-            - Include spatial relationships, background elements, and the general setting.
+            - Write a rich, detailed description of the scene.
+            - Include spatial relationships, background elements, and general setting/context relevant to identifying and localizing entities.
             - Be objective and avoid culturally biased interpretations.
             - Do not infer names or identities unless explicitly shown in the image (e.g., "man in red shirt" instead of "John").
-
-            ### **2. Scene Description (Brazilian Portuguese):**
-
-            - Provide a Brazilian Portuguese translation of the above English description.
-            - Ensure that all entity labels (e.g., [person], [vehicle], [text]) remain unchanged and in the same positions as in the English version.
+            - After writing the description in English, provide a Brazilian Portuguese translation of the same description.
+            - Maintain all entity labels (e.g., [person], [vehicle], [text]) unchanged and in their original positions within the translated version.
 
             ### **3. Event Description:**
 
@@ -120,16 +117,13 @@ def analyze_image(image_path, pipe):
         return ""
 
 def extract_details(response_text):
-    """Extracts structured sections from the response based on the provided headings."""
-    # Define the header patterns for each section
+    """Extracts structured sections from the response."""
     headers = [
         ("entities_relationships", r"### \*\*1\.\s*Entities & Relationships.*?\*\*"),
-        ("scene_description_english", r"### \*\*2\. Scene Description \(English\):\*\*"),
-        ("scene_description_portuguese", r"### \*\*2\. Scene Description \(Brazilian Portuguese\):\*\*"),
+        ("scene_description", r"### \*\*2\.\s*Scene Description.*?\*\*"),
         ("event_description", r"### \*\*3\.\s*Event Description.*?\*\*"),
         ("objects_list", r"### \*\*4\.\s*Objects List.*?\*\*")
     ]
-    # Find start positions for each header if present
     header_starts = {key: re.search(pat, response_text).start() for key, pat in headers if re.search(pat, response_text)}
     header_ends = {key: re.search(pat, response_text).end() for key, pat in headers if re.search(pat, response_text)}
     sorted_keys = sorted(header_starts, key=header_starts.get)
@@ -140,20 +134,28 @@ def extract_details(response_text):
         text = response_text[start:end].strip() if end else response_text[start:].strip()
         lines = [re.sub(r"^\*\s+", "", line) for line in text.split("\n") if line.strip()]
         details[key] = "\n".join(lines)
-    
-    # Ensure that all required keys exist
-    return {
-        "entities_relationships": details.get("entities_relationships", "No data available"),
-        "scene_description_english": details.get("scene_description_english", "No data available"),
-        "scene_description_portuguese": details.get("scene_description_portuguese", "No data available"),
-        "event_description": details.get("event_description", "No data available"),
-        "objects_list": details.get("objects_list", "No data available")
-    }
+    return {key: details.get(key, "No data available") for key, _ in headers}
 
 def remove_markdown_bolding(text):
     """Removes Markdown bolding from text."""
     return re.sub(r'\*\*(.*?)\*\*', r'\1', text)
 
+def split_scene_description(text):
+    """
+    Splits the scene description into English and Brazilian Portuguese parts.
+    First, check if the marker "Brazilian Portuguese Translation:" exists.
+    If found, use it as the delimiter; otherwise, use a double newline separator.
+    """
+    marker = "Brazilian Portuguese Translation:"
+    if marker in text:
+        english, portuguese = text.split(marker, 1)
+        return english.strip(), portuguese.strip()
+    else:
+        parts = text.split('\n\n')
+        if len(parts) >= 2:
+            return parts[0].strip(), parts[1].strip()
+        else:
+            return text.strip(), ""
 
 def process_image(task):
     """
@@ -165,7 +167,7 @@ def process_image(task):
 
     # Set the visible GPU for this process so that only the desired GPU is used.
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-    torch.cuda.set_device(0)  # Now device 0 refers to the selected GPU
+    torch.cuda.set_device(0)  # In the context of this process, the chosen GPU is now device 0
 
     if pipe is None:
         # Load the pipeline without the device argument
@@ -183,13 +185,15 @@ def process_image(task):
     if analysis and analysis.strip():
         analysis_data = extract_details(analysis)
         cleaned_data = {k: remove_markdown_bolding(v) for k, v in analysis_data.items()}
+        # Split the scene description into English and Portuguese
+        english_scene, portuguese_scene = split_scene_description(cleaned_data["scene_description"])
         duration = time.time() - start_time
         return {
             'image_path': image_path,
             'status': 'success',
             'entities_relationships': cleaned_data["entities_relationships"],
-            'scene_description_eng': cleaned_data["scene_description_eng"],
-            'scene_description_pt': cleaned_data["scene_description_pt"],
+            'scene_description_en': english_scene,
+            'scene_description_pt': portuguese_scene,
             'event_description': cleaned_data["event_description"],
             'objects_list': cleaned_data["objects_list"],
             'duration': duration,
@@ -198,23 +202,24 @@ def process_image(task):
     return {'image_path': image_path, 'status': 'failed', 'gpu': gpu_id}
 
 if __name__ == '__main__':
-    image_paths = [f'images/{i:05d}.jpg' for i in range(1, 5)]
+    # Generate list of image paths; adjust as needed
+    image_paths = [f'images/{i:05d}.jpg' for i in range(1, 500)]
+    
+    # Create tasks as tuples: (image_path, gpu_id) using round-robin assignment.
     tasks = [(img, i % 2) for i, img in enumerate(image_paths)]
-    csv_file = 'structured_image_analysis_results_finals.csv'
+    
+    csv_file = 'structured_image_analysis_results_finalss.csv'
     total_images = len(tasks)
     counter = 0
 
+    # Create a pool with 2 workers.
     with Pool(processes=2) as pool:
         with open(csv_file, 'w', newline='', encoding='utf-8') as file:
             writer = csv.writer(file)
             writer.writerow([
-                "Image Path", 
-                "GPU", 
-                "Entities & Relationships", 
-                "Scene Description (English)", 
-                "Scene Description (Brazilian Portuguese)", 
-                "Event Description", 
-                "Objects List"
+                "Image Path", "GPU", "Entities & Relationships",
+                "Scene Description (English)", "Scene Description (Portuguese)",
+                "Event Description", "Objects List"
             ])
             for result in pool.imap_unordered(process_image, tasks):
                 if result['status'] == 'success':
@@ -222,7 +227,7 @@ if __name__ == '__main__':
                         result['image_path'],
                         result['gpu'],
                         result['entities_relationships'],
-                        result['scene_description_eng'],
+                        result['scene_description_en'],
                         result['scene_description_pt'],
                         result['event_description'],
                         result['objects_list']
@@ -232,4 +237,3 @@ if __name__ == '__main__':
                 else:
                     print(f"Failed to process {result['image_path']} on GPU {result['gpu']}")
 
-    print(f"Analysis complete. Results saved to {csv_file}")
